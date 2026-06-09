@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Română — Language Learning</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; width: 100%; overflow: hidden; }
+    body { background: #0f0f1a; font-family: 'Segoe UI', system-ui, sans-serif; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0f0f1a; }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+const CLAUDE_MODEL = "claude-sonnet-4-20250514";
+const STORAGE_KEY = "romanian_app_data";
+
+const defaultData = {
+  learnedWords: [],
+  chatHistory: [],
+  streak: { lastDate: null, count: 0 },
+  totalWords: 0,
+};
+
+function loadData() {
+  try {
+    const s = localStorage.getItem(STORAGE_KEY);
+    return s ? { ...defaultData, ...JSON.parse(s) } : defaultData;
+  } catch { return defaultData; }
+}
+
+function saveData(d) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {}
+}
+
+function speak(text, lang = "ro-RO") {
+  if (!window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = lang;
+  u.rate = 0.85;
+  window.speechSynthesis.speak(u);
+}
+
+async function callClaude(messages, system = "") {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 1000,
+      system,
+      messages,
+    }),
+  });
+  const data = await res.json();
+  return data.content?.map(b => b.text || "").join("") || "";
+}
+
+// ─── HEADER ───────────────────────────────────────────────────────────────────
+function Header({ appData }) {
+  const streak = appData.streak?.count || 0;
+  const words = appData.learnedWords?.length || 0;
+  return (
+    <div style={{ background: "linear-gradient(135deg,#1a1a2e,#16213e)", padding: "16px 24px", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "2px solid #00d4ff" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 28 }}>🇷🇴</span>
+        <div>
+          <div style={{ color: "#00d4ff", fontWeight: 800, fontSize: 18, letterSpacing: 1 }}>ROMÂNĂ</div>
+          <div style={{ color: "#aaa", fontSize: 11 }}>Language Learning</div>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 20 }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ color: "#ff6b35", fontSize: 20, fontWeight: 800 }}>🔥 {streak}</div>
+          <div style={{ color: "#aaa", fontSize: 10 }}>Day Streak</div>
+        </div>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ color: "#00d4ff", fontSize: 20, fontWeight: 800 }}>📚 {words}</div>
+          <div style={{ color: "#aaa", fontSize: 10 }}>Words Learned</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── CHAT TAB ─────────────────────────────────────────────────────────────────
+const CHAT_SYSTEM = `You are a warm, encouraging Romanian language tutor for an English speaker. 
+The learner is a BEGINNER but has Romanian family and has lived in Romania, so they may know random words/phrases.
+They want to practice everyday conversation and opinions with family and random people.
+
+RULES:
+1. Speak mostly in Romanian using SHORT, SIMPLE sentences. Use only common words for beginners.
+2. Every Romanian reply must include:
+   - The Romanian sentence
+   - Phonetic pronunciation in parentheses (e.g. "boo-nah ZEE-wa")
+   - English translation in brackets [Good day]
+3. If the learner makes a Romanian mistake, kindly correct it: show what they wrote → corrected version → one-line explanation.
+4. Keep replies to 1-2 sentences MAX. Always end with a simple question to keep conversation going.
+5. If asked to role-play (barista, taxi, etc.) — stay in character in Romanian, keep correcting.
+6. If asked to break down a sentence word by word: show each word, its meaning, and grammar note.
+7. If asked for a flashcard list on a topic: give exactly 10 words/phrases with Romanian | pronunciation | English.
+8. If asked for a short story: write one using only simple, common vocabulary.
+9. You have memory of this conversation. Gently review old words before teaching new ones.
+10. NEVER give a grammar lecture. Teach by talking. Make the learner feel progress.
+11. Format your response clearly with line breaks between the Romanian, pronunciation, and translation.`;
+
+function ChatTab({ appData, setAppData }) {
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const bottomRef = useRef(null);
+  const msgs = appData.chatHistory || [];
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs]);
+
+  const send = async () => {
+    if (!input.trim() || loading) return;
+    const userMsg = { role: "user", content: input };
+    const newHistory = [...msgs, userMsg];
+    const updated = { ...appData, chatHistory: newHistory };
+    setAppData(updated);
+    saveData(updated);
+    setInput("");
+    setLoading(true);
+    try {
+      const apiMsgs = newHistory.map(m => ({ role: m.role, content: m.content }));
+      const reply = await callClaude(apiMsgs, CHAT_SYSTEM);
+      const assistantMsg = { role: "assistant", content: reply };
+      const final = { ...updated, chatHistory: [...newHistory, assistantMsg] };
+      setAppData(final);
+      saveData(final);
+    } catch (e) {
+      const err = { role: "assistant", content: "⚠️ Error connecting to tutor. Please try again." };
+      const final = { ...updated, chatHistory: [...newHistory, err] };
+      setAppData(final);
+    }
+    setLoading(false);
+  };
+
+  const clearChat = () => {
+    const updated = { ...appData, chatHistory: [] };
+    setAppData(updated);
+    saveData(updated);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#0f0f1a" }}>
+      <div style={{ padding: "10px 16px", background: "#1a1a2e", borderBottom: "1px solid #333", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <span style={{ color: "#00d4ff", fontWeight: 700 }}>💬 Your Romanian Tutor</span>
+          <span style={{ color: "#888", fontSize: 12, marginLeft: 10 }}>Beginner · Everyday conversation</span>
+        </div>
+        <button onClick={clearChat} style={{ background: "#333", border: "none", color: "#aaa", padding: "4px 10px", borderRadius: 6, cursor: "pointer", fontSize: 12 }}>Clear</button>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+        {msgs.length === 0 && (
+          <div style={{ textAlign: "center", color: "#555", marginTop: 40 }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>👋</div>
+            <div style={{ color: "#00d4ff", fontSize: 16, fontWeight: 700 }}>Bună ziua!</div>
+            <div style={{ color: "#888", marginTop: 6, fontSize: 13 }}>Start chatting to begin your Romanian lesson.</div>
+            <div style={{ marginTop: 16, display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
+              {["Say hello to me!", "Role-play: I'm at a café", "Teach me family words", "Give me a short story"].map(s => (
+                <button key={s} onClick={() => setInput(s)} style={{ background: "#1a1a2e", border: "1px solid #00d4ff33", color: "#00d4ff", padding: "6px 12px", borderRadius: 20, cursor: "pointer", fontSize: 12 }}>{s}</button>
+              ))}
+            </div>
+          </div>
+        )}
+        {msgs.map((m, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
+            <div style={{
+              maxWidth: "80%", padding: "10px 14px",
+              borderRadius: m.role === "user" ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
+              background: m.role === "user" ? "linear-gradient(135deg,#00d4ff,#0099cc)" : "#1e1e30",
+              color: m.role === "user" ? "#000" : "#e0e0e0", fontSize: 14, lineHeight: 1.6,
+              border: m.role === "assistant" ? "1px solid #333" : "none",
+              whiteSpace: "pre-wrap"
+            }}>
+              {m.content}
+              {m.role === "assistant" && (
+                <button onClick={() => speak(m.content.split("\n")[0])} style={{ marginLeft: 8, background: "none", border: "none", cursor: "pointer", fontSize: 14 }}>🔊</button>
+              )}
+            </div>
+          </div>
+        ))}
+        {loading && (
+          <div style={{ display: "flex", justifyContent: "flex-start" }}>
+            <div style={{ background: "#1e1e30", border: "1px solid #333", padding: "10px 16px", borderRadius: "18px 18px 18px 4px", color: "#888" }}>
+              <span style={{ animation: "pulse 1s infinite" }}>Tutorul tău scrie... ✍️</span>
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+      <div style={{ padding: 12, background: "#1a1a2e", borderTop: "1px solid #333", display: "flex", gap: 8 }}>
+        <input
+          value={input} onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && send()}
+          placeholder="Type in English or Romanian..."
+          style={{ flex: 1, background: "#0f0f1a", border: "1px solid #333", borderRadius: 24, padding: "10px 16px", color: "#fff", fontSize: 14, outline: "none" }}
+        />
+        <button onClick={send} disabled={loading} style={{ background: "linear-gradient(135deg,#00d4ff,#0099cc)", border: "none", borderRadius: 24, padding: "10px 20px", color: "#000", fontWeight: 800, cursor: "pointer", fontSize: 14 }}>
+          {loading ? "..." : "Send"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── ALPHABET TAB ─────────────────────────────────────────────────────────────
+const ALPHABET = [
+  { l: "A a", ph: "ah", ex: "apă", exMean: "water" },
+  { l: "Ă ă", ph: "uh", ex: "ăsta", exMean: "this" },
+  { l: "Â â", ph: "ɨ (like 'i' deep in throat)", ex: "mâna", exMean: "hand" },
+  { l: "B b", ph: "beh", ex: "bun", exMean: "good" },
+  { l: "C c", ph: "cheh", ex: "casă", exMean: "house" },
+  { l: "D d", ph: "deh", ex: "da", exMean: "yes" },
+  { l: "E e", ph: "eh", ex: "este", exMean: "is" },
+  { l: "F f", ph: "feh", ex: "familie", exMean: "family" },
+  { l: "G g", ph: "geh", ex: "gară", exMean: "station" },
+  { l: "H h", ph: "hah", ex: "hotel", exMean: "hotel" },
+  { l: "I i", ph: "ee", ex: "iubire", exMean: "love" },
+  { l: "Î î", ph: "ɨ (same as â)", ex: "înalt", exMean: "tall" },
+  { l: "J j", ph: "zheh", ex: "jos", exMean: "down" },
+  { l: "L l", ph: "leh", ex: "lapte", exMean: "milk" },
+  { l: "M m", ph: "meh", ex: "mamă", exMean: "mother" },
+  { l: "N n", ph: "neh", ex: "noapte", exMean: "night" },
+  { l: "O o", ph: "oh", ex: "om", exMean: "man/person" },
+  { l: "P p", ph: "peh", ex: "pâine", exMean: "bread" },
+  { l: "R r", ph: "reh (rolled)", ex: "roșu", exMean: "red" },
+  { l: "S s", ph: "seh", ex: "soare", exMean: "sun" },
+  { l: "Ș ș", ph: "sheh", ex: "școală", exMean: "school" },
+  { l: "T t", ph: "teh", ex: "tată", exMean: "father" },
+  { l: "Ț ț", ph: "tseh", ex: "țară", exMean: "country" },
+  { l: "U u", ph: "oo", ex: "ușă", exMean: "door" },
+  { l: "V v", ph: "veh", ex: "verde", exMean: "green" },
+  { l: "X x", ph: "ks", ex: "exemplu", exMean: "example" },
+  { l: "Z z", ph: "zeh", ex: "zi", exMean: "day" },
+];
+
+function AlphabetTab() {
+  const [selected, setSelected] = useState(null);
+  return (
+    <div style={{ padding: 16, overflowY: "auto", background: "#0f0f1a", height: "100%" }}>
+      <h2 style={{ color: "#00d4ff", marginBottom: 4, fontWeight: 800 }}>Romanian Alphabet</h2>
+      <p style={{ color: "#888", fontSize: 13, marginBottom: 16 }}>Tap any letter to hear it and see an example word.</p>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(90px, 1fr))", gap: 10 }}>
+        {ALPHABET.map((a, i) => (
+          <div key={i} onClick={() => { setSelected(a); speak(a.ex); }}
+            style={{ background: selected?.l === a.l ? "linear-gradient(135deg,#00d4ff,#0099cc)" : "#1e1e30", border: "1px solid #333", borderRadius: 12, padding: "12px 8px", textAlign: "center", cursor: "pointer", transition: "all 0.2s" }}>
+            <div style={{ fontSize: 22, fontWeight: 800, color: selected?.l === a.l ? "#000" : "#fff" }}>{a.l}</div>
+            <div style={{ fontSize: 11, color: selected?.l === a.l ? "#003" : "#888", marginTop: 2 }}>{a.ph}</div>
+          </div>
+        ))}
+      </div>
+      {selected && (
+        <div style={{ marginTop: 20, background: "#1e1e30", border: "1px solid #00d4ff44", borderRadius: 16, padding: 20 }}>
+          <div style={{ fontSize: 32, fontWeight: 900, color: "#00d4ff" }}>{selected.l}</div>
+          <div style={{ color: "#aaa", fontSize: 14, marginTop: 4 }}>Pronounced: <span style={{ color: "#fff" }}>{selected.ph}</span></div>
+          <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 24 }}>📖</span>
+            <div>
+              <div style={{ color: "#fff", fontWeight: 700, fontSize: 18 }}>{selected.ex}</div>
+              <div style={{ color: "#888", fontSize: 13 }}>= {selected.exMean}</div>
+            </div>
+            <button onClick={() => speak(selected.ex)} style={{ marginLeft: "auto", background: "#00d4ff22", border: "1px solid #00d4ff", color: "#00d4ff", borderRadius: 20, padding: "6px 14px", cursor: "pointer" }}>🔊 Play</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── VOCAB TAB ────────────────────────────────────────────────────────────────
+const PRESET_DECKS = {
+  "👋 Greetings": [
+    { ro: "Bună ziua", ph: "BOO-nuh ZEE-wa", en: "Good day / Hello" },
+    { ro: "Bună dimineața", ph: "BOO-nuh dee-mee-NYAH-tsa", en: "Good morning" },
+    { ro: "Bună seara", ph: "BOO-nuh SYAH-ra", en: "Good evening" },
+    { ro: "La revedere", ph: "la reh-veh-DEH-reh", en: "Goodbye" },
+    { ro: "Pe curând", ph: "peh koo-RUND", en: "See you soon" },
+    { ro: "Ce mai faci?", ph: "cheh my FACH", en: "How are you?" },
+    { ro: "Mulțumesc", ph: "mool-tsoo-MESK", en: "Thank you" },
+    { ro: "Cu plăcere", ph: "koo pluh-CHEH-reh", en: "You're welcome" },
+    { ro: "Scuze", ph: "SKOO-zeh", en: "Sorry / Excuse me" },
+    { ro: "Da / Nu", ph: "da / noo", en: "Yes / No" },
+  ],
+  "🍕 Food": [
+    { ro: "apă", ph: "AH-puh", en: "water" },
+    { ro: "pâine", ph: "PUH-ee-neh", en: "bread" },
+    { ro: "carne", ph: "KAR-neh", en: "meat" },
+    { ro: "legume", ph: "leh-GOO-meh", en: "vegetables" },
+    { ro: "fructe", ph: "FROOK-teh", en: "fruit" },
+    { ro: "cafea", ph: "kah-FEH-ah", en: "coffee" },
+    { ro: "vin", ph: "veen", en: "wine" },
+    { ro: "mâncare", ph: "mun-KAH-reh", en: "food / meal" },
+    { ro: "desert", ph: "deh-SERT", en: "dessert" },
+    { ro: "ciorbă", ph: "CHOR-buh", en: "sour soup (traditional)" },
+  ],
+  "✈️ Travel": [
+    { ro: "aeroport", ph: "ah-eh-ro-PORT", en: "airport" },
+    { ro: "tren", ph: "tren", en: "train" },
+    { ro: "autobuz", ph: "ow-to-BOOZ", en: "bus" },
+    { ro: "hotel", ph: "ho-TEL", en: "hotel" },
+    { ro: "bilet", ph: "bee-LET", en: "ticket" },
+    { ro: "unde este...?", ph: "OON-deh YES-teh", en: "where is...?" },
+    { ro: "la stânga", ph: "la STUN-ga", en: "to the left" },
+    { ro: "la dreapta", ph: "la DRYAHP-ta", en: "to the right" },
+    { ro: "aproape", ph: "ah-PRWAH-peh", en: "near / close" },
+    { ro: "departe", ph: "deh-PAR-teh", en: "far" },
+  ],
+  "🔢 Numbers": [
+    { ro: "unu", ph: "OO-noo", en: "one" },
+    { ro: "doi / două", ph: "doy / DWAH-uh", en: "two (m/f)" },
+    { ro: "trei", ph: "trey", en: "three" },
+    { ro: "patru", ph: "PAT-roo", en: "four" },
+    { ro: "cinci", ph: "chinch", en: "five" },
+    { ro: "șase", ph: "SHAH-seh", en: "six" },
+    { ro: "șapte", ph: "SHAHP-teh", en: "seven" },
+    { ro: "opt", ph: "opt", en: "eight" },
+    { ro: "nouă", ph: "NOH-uh", en: "nine" },
+    { ro: "zece", ph: "ZEH-cheh", en: "ten" },
+  ],
+};
+
+function VocabTab({ appData, setAppData }) {
+  const [activeDeck, setActiveDeck] = useState(null);
+  const [cards, setCards] = useState([]);
+  const [cardIdx, setCardIdx] = useState(0);
+  const [flipped, setFlipped] = useState(false);
+  const [topic, setTopic] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [deckName, setDeckName] = useState("");
+
+  const openDeck = (name, deck) => { setDeckName(name); setCards(deck); setActiveDeck(true); setCardIdx(0); setFlipped(false); };
+
+  const generateDeck = async () => {
+    if (!topic.trim()) return;
+    setGenerating(true);
+    try {
+      const sys = `You are a Romanian vocabulary teacher. Return ONLY a JSON array of exactly 10 objects, no markdown, no explanation. Each object: {"ro":"Romanian word/phrase","ph":"phonetic pronunciation","en":"English meaning"}. Topic: ${topic}`;
+      const raw = await callClaude([{ role: "user", content: `Create 10 Romanian flashcards for the topic: ${topic}` }], sys);
+      const clean = raw.replace(/```json|```/g, "").trim();
+      const deck = JSON.parse(clean);
+      openDeck(`✨ ${topic}`, deck);
+    } catch { alert("Error generating deck. Try again."); }
+    setGenerating(false);
+  };
+
+  const markLearned = () => {
+    const word = cards[cardIdx];
+    const existing = appData.learnedWords || [];
+    if (!existing.find(w => w.ro === word.ro)) {
+      const updated = { ...appData, learnedWords: [...existing, word] };
+      setAppData(updated);
+      saveData(updated);
+    }
+  };
+
+  if (activeDeck && cards.length) {
+    const card = cards[cardIdx];
+    return (
+      <div style={{ padding: 20, background: "#0f0f1a", height: "100%", display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+          <button onClick={() => setActiveDeck(false)} style={{ background: "#1e1e30", border: "1px solid #333", color: "#aaa", padding: "6px 12px", borderRadius: 8, cursor: "pointer" }}>← Back</button>
+          <span style={{ color: "#00d4ff", fontWeight: 700 }}>{deckName}</span>
+          <span style={{ color: "#888", fontSize: 12, marginLeft: "auto" }}>{cardIdx + 1} / {cards.length}</span>
+        </div>
+        <div onClick={() => setFlipped(!flipped)} style={{ flex: 1, maxHeight: 280, background: flipped ? "linear-gradient(135deg,#00d4ff,#0099cc)" : "#1e1e30", border: "1px solid #333", borderRadius: 20, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", cursor: "pointer", padding: 30, textAlign: "center" }}>
+          {!flipped ? (
+            <>
+              <div style={{ fontSize: 32, fontWeight: 900, color: "#fff", marginBottom: 8 }}>{card.ro}</div>
+              <div style={{ color: "#888", fontSize: 13 }}>({card.ph})</div>
+              <div style={{ color: "#555", fontSize: 12, marginTop: 16 }}>Tap to reveal</div>
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 28, fontWeight: 900, color: "#000" }}>{card.en}</div>
+              <div style={{ color: "#003", fontSize: 14, marginTop: 8 }}>{card.ro}</div>
+            </>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+          <button onClick={() => speak(card.ro)} style={{ flex: 1, background: "#1e1e30", border: "1px solid #333", color: "#fff", padding: 12, borderRadius: 12, cursor: "pointer" }}>🔊 Hear</button>
+          <button onClick={markLearned} style={{ flex: 1, background: "#1e1e30", border: "1px solid #00ff88", color: "#00ff88", padding: 12, borderRadius: 12, cursor: "pointer" }}>✓ Learned</button>
+          <button onClick={() => { setCardIdx((cardIdx + 1) % cards.length); setFlipped(false); }} style={{ flex: 1, background: "linear-gradient(135deg,#00d4ff,#0099cc)", border: "none", color: "#000", padding: 12, borderRadius: 12, cursor: "pointer", fontWeight: 700 }}>Next →</button>
+        </div>
+        <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
+          {cards.map((_, i) => (
+            <div key={i} onClick={() => { setCardIdx(i); setFlipped(false); }} style={{ width: 10, height: 10, borderRadius: "50%", background: i === cardIdx ? "#00d4ff" : "#333", cursor: "pointer" }} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding: 16, overflowY: "auto", background: "#0f0f1a", height: "100%" }}>
+      <h2 style={{ color: "#00d4ff", fontWeight: 800, marginBottom: 4 }}>Vocabulary Decks</h2>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 24 }}>
+        {Object.entries(PRESET_DECKS).map(([name, deck]) => (
+          <div key={name} onClick={() => openDeck(name, deck)} style={{ background: "#1e1e30", border: "1px solid #333", borderRadius: 14, padding: 16, cursor: "pointer", textAlign: "center" }}>
+            <div style={{ fontSize: 28 }}>{name.split(" ")[0]}</div>
+            <div style={{ color: "#fff", fontWeight: 700, fontSize: 13, marginTop: 4 }}>{name.split(" ").slice(1).join(" ")}</div>
+            <div style={{ color: "#888", fontSize: 11 }}>{deck.length} cards</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ background: "#1e1e30", border: "1px solid #00d4ff44", borderRadius: 16, padding: 16 }}>
+        <div style={{ color: "#00d4ff", fontWeight: 700, marginBottom: 10 }}>✨ Generate Custom Deck</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input value={topic} onChange={e => setTopic(e.target.value)} onKeyDown={e => e.key === "Enter" && generateDeck()} placeholder="e.g. family, weather, emotions..." style={{ flex: 1, background: "#0f0f1a", border: "1px solid #333", borderRadius: 10, padding: "10px 14px", color: "#fff", fontSize: 14, outline: "none" }} />
+          <button onClick={generateDeck} disabled={generating} style={{ background: "linear-gradient(135deg,#00d4ff,#0099cc)", border: "none", borderRadius: 10, padding: "10px 16px", color: "#000", fontWeight: 800, cursor: "pointer" }}>
+            {generating ? "..." : "Go"}
+          </button>
+        </div>
+      </div>
+      {appData.learnedWords?.length > 0 && (
+        <div style={{ marginTop: 16, background: "#0a1f0a", border: "1px solid #00ff8833", borderRadius: 14, padding: 14 }}>
+          <div style={{ color: "#00ff88", fontWeight: 700, marginBottom: 8 }}>✅ Learned Words ({appData.learnedWords.length})</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {appData.learnedWords.map((w, i) => (
+              <span key={i} style={{ background: "#00ff8822", border: "1px solid #00ff8844", color: "#00ff88", padding: "3px 10px", borderRadius: 20, fontSize: 12 }}>{w.ro}</span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── TRANSLATE TAB ────────────────────────────────────────────────────────────
+const TRANSLATE_SYSTEM = `You are a Romanian-English translation assistant. 
+When given text, detect if it's English or Romanian, translate it, and provide:
+1. Original text
+2. Translation
+3. Phonetic pronunciation of the Romanian text (in parentheses)
+4. Word-by-word breakdown as a list: each word | meaning | grammar note (gender, tense, case etc.)
+
+Format your response EXACTLY like this:
+TRANSLATION: [translated text]
+PRONUNCIATION: [phonetic]
+BREAKDOWN:
+- word: meaning (grammar note)
+- word: meaning (grammar note)
+...`;
+
+function TranslateTab() {
+  const [input, setInput] = useState("");
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const translate = async () => {
+    if (!input.trim()) return;
+    setLoading(true);
+    try {
+      const raw = await callClaude([{ role: "user", content: input }], TRANSLATE_SYSTEM);
+      setResult({ raw, original: input });
+    } catch { setResult({ raw: "⚠️ Translation error.", original: input }); }
+    setLoading(false);
+  };
+
+  const parseResult = (raw) => {
+    const lines = raw.split("\n");
+    let translation = "", pronunciation = "", breakdown = [];
+    let inBreakdown = false;
+    for (const line of lines) {
+      if (line.startsWith("TRANSLATION:")) translation = line.replace("TRANSLATION:", "").trim();
+      else if (line.startsWith("PRONUNCIATION:")) pronunciation = line.replace("PRONUNCIATION:", "").trim();
+      else if (line.startsWith("BREAKDOWN:")) inBreakdown = true;
+      else if (inBreakdown && line.trim().startsWith("-")) breakdown.push(line.replace("-", "").trim());
+    }
+    return { translation, pronunciation, breakdown };
+  };
+
+  return (
+    <div style={{ padding: 16, overflowY: "auto", background: "#0f0f1a", height: "100%" }}>
+      <h2 style={{ color: "#00d4ff", fontWeight: 800, marginBottom: 4 }}>Translate</h2>
+      <p style={{ color: "#888", fontSize: 13, marginBottom: 16 }}>Type English or Romanian — auto-detected.</p>
+      <textarea value={input} onChange={e => setInput(e.target.value)} placeholder="Type anything here..." rows={3}
+        style={{ width: "100%", background: "#1e1e30", border: "1px solid #333", borderRadius: 12, padding: 14, color: "#fff", fontSize: 15, resize: "none", outline: "none" }} />
+      <button onClick={translate} disabled={loading} style={{ width: "100%", marginTop: 8, background: "linear-gradient(135deg,#00d4ff,#0099cc)", border: "none", borderRadius: 12, padding: 14, color: "#000", fontWeight: 800, fontSize: 15, cursor: "pointer" }}>
+        {loading ? "Translating..." : "🔄 Translate"}
+      </button>
+      {result && (() => {
+        const { translation, pronunciation, breakdown } = parseResult(result.raw);
+        return (
+          <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ background: "#1e1e30", border: "1px solid #333", borderRadius: 14, padding: 14 }}>
+              <div style={{ color: "#888", fontSize: 11, marginBottom: 4 }}>ORIGINAL</div>
+              <div style={{ color: "#fff", fontSize: 15 }}>{result.original}</div>
+            </div>
+            <div style={{ background: "#1e1e30", border: "1px solid #00d4ff44", borderRadius: 14, padding: 14 }}>
+              <div style={{ color: "#00d4ff", fontSize: 11, marginBottom: 4 }}>TRANSLATION</div>
+              <div style={{ color: "#fff", fontSize: 18, fontWeight: 700 }}>{translation || result.raw}</div>
+              {pronunciation && <div style={{ color: "#888", fontSize: 13, marginTop: 4 }}>({pronunciation})</div>}
+              {translation && <button onClick={() => speak(translation)} style={{ marginTop: 8, background: "#00d4ff22", border: "1px solid #00d4ff", color: "#00d4ff", borderRadius: 20, padding: "4px 12px", cursor: "pointer", fontSize: 12 }}>🔊 Hear</button>}
+            </div>
+            {breakdown.length > 0 && (
+              <div style={{ background: "#1e1e30", border: "1px solid #333", borderRadius: 14, padding: 14 }}>
+                <div style={{ color: "#ff6b35", fontSize: 11, marginBottom: 8 }}>WORD-BY-WORD BREAKDOWN</div>
+                {breakdown.map((b, i) => {
+                  const [word, rest] = b.split(":").map(s => s.trim());
+                  return (
+                    <div key={i} style={{ display: "flex", gap: 8, padding: "6px 0", borderBottom: i < breakdown.length - 1 ? "1px solid #2a2a3a" : "none", flexWrap: "wrap" }}>
+                      <span style={{ color: "#00d4ff", fontWeight: 700, minWidth: 80 }}>{word}</span>
+                      <span style={{ color: "#ccc", flex: 1 }}>{rest}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+// ─── CONJUGATIONS TAB ─────────────────────────────────────────────────────────
+const VERB_GROUPS = {
+  "I-a": {
+    label: "Group I-a · ends in -a (no suffix)",
+    color: "#00d4ff",
+    pattern: "Present: cânt / cânți / cântă / cântăm / cântați / cântă",
+    verbs: [
+      { inf: "a cânta", en: "to sing" }, { inf: "a asculta", en: "to listen" },
+      { inf: "a ajuta", en: "to help" }, { inf: "a căuta", en: "to search/look for" },
+      { inf: "a cumpăra", en: "to buy" }, { inf: "a explica", en: "to explain" },
+      { inf: "a ierta", en: "to forgive" }, { inf: "a juca", en: "to play" },
+      { inf: "a lăsa", en: "to let/leave" }, { inf: "a pleca", en: "to leave/depart" },
+      { inf: "a purta", en: "to wear/carry" }, { inf: "a repeta", en: "to repeat" },
+      { inf: "a rezolva", en: "to solve" }, { inf: "a termina", en: "to finish" },
+      { inf: "a urca", en: "to climb/go up" }, { inf: "a zbura", en: "to fly" },
+      { inf: "a întreba", en: "to ask" }, { inf: "a deschide", en: "to open" },
+      { inf: "a închide", en: "to close" }, { inf: "a umple", en: "to fill" },
+    ],
+  },
+  "I-ez": {
+    label: "Group I-ez · ends in -a (suffix -ez)",
+    color: "#ff6b35",
+    pattern: "Present: lucrez / lucrezi / lucrează / lucrăm / lucrați / lucrează",
+    verbs: [
+      { inf: "a lucra", en: "to work" }, { inf: "a dansa", en: "to dance" },
+      { inf: "a visa", en: "to dream" }, { inf: "a vizita", en: "to visit" },
+      { inf: "a studia", en: "to study" }, { inf: "a telefona", en: "to phone" },
+      { inf: "a fotografia", en: "to photograph" }, { inf: "a aprecia", en: "to appreciate" },
+      { inf: "a crea", en: "to create" }, { inf: "a prezenta", en: "to present" },
+      { inf: "a rezerva", en: "to book/reserve" }, { inf: "a accepta", en: "to accept" },
+      { inf: "a întreba", en: "to ask" }, { inf: "a folosi", en: "to use" },
+      { inf: "a continua", en: "to continue" }, { inf: "a declara", en: "to declare" },
+    ],
+  },
+  "II": {
+    label: "Group II · ends in -ea",
+    color: "#ffd700",
+    pattern: "Present: văd / vezi / vede / vedem / vedeți / văd",
+    verbs: [
+      { inf: "a vedea", en: "to see" }, { inf: "a putea", en: "to be able / can" },
+      { inf: "a cădea", en: "to fall" }, { inf: "a părea", en: "to seem" },
+      { inf: "a plăcea", en: "to please / like" }, { inf: "a tăcea", en: "to be silent" },
+      { inf: "a apărea", en: "to appear" }, { inf: "a dispărea", en: "to disappear" },
+      { inf: "a rămâne", en: "to remain/stay" }, { inf: "a recunoaște", en: "to recognise" },
+    ],
+  },
+  "III": {
+    label: "Group III · ends in -e",
+    color: "#a855f7",
+    pattern: "Present: fac / faci / face / facem / faceți / fac",
+    verbs: [
+      { inf: "a face", en: "to do / make" }, { inf: "a merge", en: "to go / walk" },
+      { inf: "a cere", en: "to ask for / request" }, { inf: "a spune", en: "to say / tell" },
+      { inf: "a pune", en: "to put / place" }, { inf: "a bea", en: "to drink" },
+      { inf: "a da", en: "to give" }, { inf: "a lua", en: "to take" },
+      { inf: "a scrie", en: "to write" }, { inf: "a citi", en: "to read" },
+      { inf: "a duce", en: "to take/carry" }, { inf: "a aduce", en: "to bring" },
+      { inf: "a cunoaște", en: "to know (a person)" }, { inf: "a înțelege", en: "to understand" },
+      { inf: "a trece", en: "to pass" }, { inf: "a rezolva", en: "to solve" },
+    ],
+  },
+  "IV-plain": {
+    label: "Group IV-a · ends in -i/-î (no suffix)",
+    color: "#00ff88",
+    pattern: "Present: vin / vii / vine / venim / veniți / vin",
+    verbs: [
+      { inf: "a veni", en: "to come" }, { inf: "a dormi", en: "to sleep" },
+      { inf: "a simți", en: "to feel" }, { inf: "a ști", en: "to know (a fact)" },
+      { inf: "a ieși", en: "to go out / exit" }, { inf: "a intra", en: "to enter" },
+      { inf: "a fugi", en: "to run / flee" }, { inf: "a împărți", en: "to share / divide" },
+      { inf: "a oferi", en: "to offer" }, { inf: "a suferi", en: "to suffer" },
+      { inf: "a deschide", en: "to open" }, { inf: "a acoperi", en: "to cover" },
+    ],
+  },
+  "IV-esc": {
+    label: "Group IV-b · ends in -i (suffix -esc)",
+    color: "#ff4d8d",
+    pattern: "Present: iubesc / iubești / iubește / iubim / iubiți / iubesc",
+    verbs: [
+      { inf: "a iubi", en: "to love" }, { inf: "a vorbi", en: "to speak" },
+      { inf: "a plăti", en: "to pay" }, { inf: "a munci", en: "to work hard" },
+      { inf: "a locui", en: "to live (reside)" }, { inf: "a mulțumi", en: "to thank" },
+      { inf: "a opri", en: "to stop" }, { inf: "a primi", en: "to receive" },
+      { inf: "a defini", en: "to define" }, { inf: "a construi", en: "to build" },
+      { inf: "a contribui", en: "to contribute" }, { inf: "a alege", en: "to choose" },
+      { inf: "a folosi", en: "to use" }, { inf: "a pricepe", en: "to understand" },
+    ],
+  },
+  "IV-asc": {
+    label: "Group IV-c · ends in -î (suffix -ăsc)",
+    color: "#818cf8",
+    pattern: "Present: cobor / cobori / coboară / coborâm / coborâți / coboară",
+    verbs: [
+      { inf: "a coborî", en: "to go down / descend" }, { inf: "a urî", en: "to hate" },
+      { inf: "a hotărî", en: "to decide" }, { inf: "a omrî", en: "to kill" },
+      { inf: "a doborî", en: "to knock down" }, { inf: "a omorî", en: "to kill" },
+    ],
+  },
+};
+
+const CONJUGATIONS = {
+  "a fi": {
+    en: "to be", group: null,
+    "Present":        { eu: "sunt", tu: "ești", "el/ea": "este", "noi": "suntem", "voi": "sunteți", "ei/ele": "sunt" },
+    "Imperfect":      { eu: "eram", tu: "erai", "el/ea": "era", "noi": "eram", "voi": "erați", "ei/ele": "erau" },
+    "Perfect Compus": { eu: "am fost", tu: "ai fost", "el/ea": "a fost", "noi": "am fost", "voi": "ați fost", "ei/ele": "au fost" },
+    "Perfect Simplu": { eu: "fui", tu: "fuși", "el/ea": "fu", "noi": "furăm", "voi": "furăți", "ei/ele": "fură" },
+    "Mai Mult Ca Perf.": { eu: "fusesem", tu: "fuseseși", "el/ea": "fusese", "noi": "fuseserăm", "voi": "fuseserăți", "ei/ele": "fuseseră" },
+    "Viitor":         { eu: "voi fi", tu: "vei fi", "el/ea": "va fi", "noi": "vom fi", "voi": "veți fi", "ei/ele": "vor fi" },
+    "Viitor Anterior":{ eu: "voi fi fost", tu: "vei fi fost", "el/ea": "va fi fost", "noi": "vom fi fost", "voi": "veți fi fost", "ei/ele": "vor fi fost" },
+    "Conditional":    { eu: "aș fi", tu: "ai fi", "el/ea": "ar fi", "noi": "am fi", "voi": "ați fi", "ei/ele": "ar fi" },
+    "Cond. Perfect":  { eu: "aș fi fost", tu: "ai fi fost", "el/ea": "ar fi fost", "noi": "am fi fost", "voi": "ați fi fost", "ei/ele": "ar fi fost" },
+    "Conjunctiv":     { eu: "să fiu", tu: "să fii", "el/ea": "să fie", "noi": "să fim", "voi": "să fiți", "ei/ele": "să fie" },
+    "Imperativ":      { eu: "—", tu: "fii!", "el/ea": "—", "noi": "să fim!", "voi": "fiți!", "ei/ele": "—" },
+  },
+  "a avea": {
+    en: "to have", group: null,
+    "Present":        { eu: "am", tu: "ai", "el/ea": "are", "noi": "avem", "voi": "aveți", "ei/ele": "au" },
+    "Imperfect":      { eu: "aveam", tu: "aveai", "el/ea": "avea", "noi": "aveam", "voi": "aveați", "ei/ele": "aveau" },
+    "Perfect Compus": { eu: "am avut", tu: "ai avut", "el/ea": "a avut", "noi": "am avut", "voi": "ați avut", "ei/ele": "au avut" },
+    "Perfect Simplu": { eu: "avui", tu: "avuși", "el/ea": "avu", "noi": "avurăm", "voi": "avurăți", "ei/ele": "avură" },
+    "Mai Mult Ca Perf.": { eu: "avusesem", tu: "avuseseși", "el/ea": "avusese", "noi": "avuseserăm", "voi": "avuseserăți", "ei/ele": "avuseseră" },
+    "Viitor":         { eu: "voi avea", tu: "vei avea", "el/ea": "va avea", "noi": "vom avea", "voi": "veți avea", "ei/ele": "vor avea" },
+    "Viitor Anterior":{ eu: "voi fi avut", tu: "vei fi avut", "el/ea": "va fi avut", "noi": "vom fi avut", "voi": "veți fi avut", "ei/ele": "vor fi avut" },
+    "Conditional":    { eu: "aș avea", tu: "ai avea", "el/ea": "ar avea", "noi": "am avea", "voi": "ați avea", "ei/ele": "ar avea" },
+    "Cond. Perfect":  { eu: "aș fi avut", tu: "ai fi avut", "el/ea": "ar fi avut", "noi": "am fi avut", "voi": "ați fi avut", "ei/ele": "ar fi avut" },
+    "Conjunctiv":     { eu: "să am", tu: "să ai", "el/ea": "să aibă", "noi": "să avem", "voi": "să aveți", "ei/ele": "să aibă" },
+    "Imperativ":      { eu: "—", tu: "ai!", "el/ea": "—", "noi": "să avem!", "voi": "aveți!", "ei/ele": "—" },
+  },
+  "a cânta": {
+    en: "to sing", group: "I-a",
+    "Present":        { eu: "cânt", tu: "cânți", "el/ea": "cântă", "noi": "cântăm", "voi": "cântați", "ei/ele": "cântă" },
+    "Imperfect":      { eu: "cântam", tu: "cântai", "el/ea": "cânta", "noi": "cântam", "voi": "cântați", "ei/ele": "cântau" },
+    "Perfect Compus": { eu: "am cântat", tu: "ai cântat", "el/ea": "a cântat", "noi": "am cântat", "voi": "ați cântat", "ei/ele": "au cântat" },
+    "Perfect Simplu": { eu: "cântai", tu: "cântași", "el/ea": "cântă", "noi": "cântarăm", "voi": "cântarăți", "ei/ele": "cântară" },
+    "Mai Mult Ca Perf.": { eu: "cântasem", tu: "cântaseși", "el/ea": "cântase", "noi": "cântaserăm", "voi": "cântaserăți", "ei/ele": "cântaseră" },
+    "Viitor":         { eu: "voi cânta", tu: "vei cânta", "el/ea": "va cânta", "noi": "vom cânta", "voi": "veți cânta", "ei/ele": "vor cânta" },
+    "Viitor Anterior":{ eu: "voi fi cântat", tu: "vei fi cântat", "el/ea": "va fi cântat", "noi": "vom fi cântat", "voi": "veți fi cântat", "ei/ele": "vor fi cântat" },
+    "Conditional":    { eu: "aș cânta", tu: "ai cânta", "el/ea": "ar cânta", "noi": "am cânta", "voi": "ați cânta", "ei/ele": "ar cânta" },
+    "Cond. Perfect":  { eu: "aș fi cântat", tu: "ai fi cântat", "el/ea": "ar fi cântat", "noi": "am fi cântat", "voi": "ați fi cântat", "ei/ele": "ar fi cântat" },
+    "Conjunctiv":     { eu: "să cânt", tu: "să cânți", "el/ea": "să cânte", "noi": "să cântăm", "voi": "să cântați", "ei/ele": "să cânte" },
+    "Imperativ":      { eu: "—", tu: "cântă!", "el/ea": "—", "noi": "să cântăm!", "voi": "cântați!", "ei/ele": "—" },
+  },
+  "a lucra": {
+    en: "to work", group: "I-ez",
+    "Present":        { eu: "lucrez", tu: "lucrezi", "el/ea": "lucrează", "noi": "lucrăm", "voi": "lucrați", "ei/ele": "lucrează" },
+    "Imperfect":      { eu: "lucram", tu: "lucrai", "el/ea": "lucra", "noi": "lucram", "voi": "lucrați", "ei/ele": "lucrau" },
+    "Perfect Compus": { eu: "am lucrat", tu: "ai lucrat", "el/ea": "a lucrat", "noi": "am lucrat", "voi": "ați lucrat", "ei/ele": "au lucrat" },
+    "Perfect Simplu": { eu: "lucrai", tu: "lucrași", "el/ea": "lucră", "noi": "lucrarăm", "voi": "lucrarăți", "ei/ele": "lucrară" },
+    "Mai Mult Ca Perf.": { eu: "lucrasem", tu: "lucraseși", "el/ea": "lucrase", "noi": "lucraserăm", "voi": "lucraserăți", "ei/ele": "lucraseră" },
+    "Viitor":         { eu: "voi lucra", tu: "vei lucra", "el/ea": "va lucra", "noi": "vom lucra", "voi": "veți lucra", "ei/ele": "vor lucra" },
+    "Viitor Anterior":{ eu: "voi fi lucrat", tu: "vei fi lucrat", "el/ea": "va fi lucrat", "noi": "vom fi lucrat", "voi": "veți fi lucrat", "ei/ele": "vor fi lucrat" },
+    "Conditional":    { eu: "aș lucra", tu: "ai lucra", "el/ea": "ar lucra", "noi": "am lucra", "voi": "ați lucra", "ei/ele": "ar lucra" },
+    "Cond. Perfect":  { eu: "aș fi lucrat", tu: "ai fi lucrat", "el/ea": "ar fi lucrat", "noi": "am fi lucrat", "voi": "ați fi lucrat", "ei/ele": "ar fi lucrat" },
+    "Conjunctiv":     { eu: "să lucrez", tu: "să lucrezi", "el/ea": "să lucreze", "noi": "să lucrăm", "voi": "să lucrați", "ei/ele": "să lucreze" },
+    "Imperativ":      { eu: "—", tu: "lucrează!", "el/ea": "—", "noi": "să lucrăm!", "voi": "lucrați!", "ei/ele": "—" },
+  },
+  "a vedea": {
+    en: "to see", group: "II",
+    "Present":        { eu: "văd", tu: "vezi", "el/ea": "vede", "noi": "vedem", "voi": "vedeți", "ei/ele": "văd" },
+    "Imperfect":      { eu: "vedeam", tu: "vedeai", "el/ea": "vedea", "noi": "vedeam", "voi": "vedeați", "ei/ele": "vedeau" },
+    "Perfect Compus": { eu: "am văzut", tu: "ai văzut", "el/ea": "a văzut", "noi": "am văzut", "voi": "ați văzut", "ei/ele": "au văzut" },
+    "Perfect Simplu": { eu: "văzui", tu: "văzuși", "el/ea": "văzu", "noi": "văzurăm", "voi": "văzurăți", "ei/ele": "văzură" },
+    "Mai Mult Ca Perf.": { eu: "văzusem", tu: "văzuseși", "el/ea": "văzuse", "noi": "văzuserăm", "voi": "văzuserăți", "ei/ele": "văzuseră" },
+    "Viitor":         { eu: "voi vedea", tu: "vei vedea", "el/ea": "va vedea", "noi": "vom vedea", "voi": "veți vedea", "ei/ele": "vor vedea" },
+    "Viitor Anterior":{ eu: "voi fi văzut", tu: "vei fi văzut", "el/ea": "va fi văzut", "noi": "vom fi văzut", "voi": "veți fi văzut", "ei/ele": "vor fi văzut" },
+    "Conditional":    { eu: "aș vedea", tu: "ai vedea", "el/ea": "ar vedea", "noi": "am vedea", "voi": "ați vedea", "ei/ele": "ar vedea" },
+    "Cond. Perfect":  { eu: "aș fi văzut", tu: "ai fi văzut", "el/ea": "ar fi văzut", "noi": "am fi văzut", "voi": "ați fi văzut", "ei/ele": "ar fi văzut" },
+    "Conjunctiv":     { eu: "să văd", tu: "să vezi", "el/ea": "să vadă", "noi": "să vedem", "voi": "să vedeți", "ei/ele": "să vadă" },
+    "Imperativ":      { eu: "—", tu: "vezi!", "el/ea": "—", "noi": "să vedem!", "voi": "vedeți!", "ei/ele": "—" },
+  },
+  "a face": {
+    en: "to do / make", group: "III",
+    "Present":        { eu: "fac", tu: "faci", "el/ea": "face", "noi": "facem", "voi": "faceți", "ei/ele": "fac" },
+    "Imperfect":      { eu: "făceam", tu: "făceai", "el/ea": "făcea", "noi": "făceam", "voi": "făceați", "ei/ele": "făceau" },
+    "Perfect Compus": { eu: "am făcut", tu: "ai făcut", "el/ea": "a făcut", "noi": "am făcut", "voi": "ați făcut", "ei/ele": "au făcut" },
+    "Perfect Simplu": { eu: "făcui", tu: "făcuși", "el/ea": "făcu", "noi": "făcurăm", "voi": "făcurăți", "ei/ele": "făcură" },
+    "Mai Mult Ca Perf.": { eu: "făcusem", tu: "făcuseși", "el/ea": "făcuse", "noi": "făcuserăm", "voi": "făcuserăți", "ei/ele": "făcuseră" },
+    "Viitor":         { eu: "voi face", tu: "vei face", "el/ea": "va face", "noi": "vom face", "voi": "veți face", "ei/ele": "vor face" },
+    "Viitor Anterior":{ eu: "voi fi făcut", tu: "vei fi făcut", "el/ea": "va fi făcut", "noi": "vom fi făcut", "voi": "veți fi făcut", "ei/ele": "vor fi făcut" },
+    "Conditional":    { eu: "aș face", tu: "ai face", "el/ea": "ar face", "noi": "am face", "voi": "ați face", "ei/ele": "ar face" },
+    "Cond. Perfect":  { eu: "aș fi făcut", tu: "ai fi făcut", "el/ea": "ar fi făcut", "noi": "am fi făcut", "voi": "ați fi făcut", "ei/ele": "ar fi făcut" },
+    "Conjunctiv":     { eu: "să fac", tu: "să faci", "el/ea": "să facă", "noi": "să facem", "voi": "să faceți", "ei/ele": "să facă" },
+    "Imperativ":      { eu: "—", tu: "fă!", "el/ea": "—", "noi": "să facem!", "voi": "faceți!", "ei/ele": "—" },
+  },
+  "a merge": {
+    en: "to go / walk", group: "III",
+    "Present":        { eu: "merg", tu: "mergi", "el/ea": "merge", "noi": "mergem", "voi": "mergeți", "ei/ele": "merg" },
+    "Imperfect":      { eu: "mergeam", tu: "mergeai", "el/ea": "mergea", "noi": "mergeam", "voi": "mergeați", "ei/ele": "mergeau" },
+    "Perfect Compus": { eu: "am mers", tu: "ai mers", "el/ea": "a mers", "noi": "am mers", "voi": "ați mers", "ei/ele": "au mers" },
+    "Perfect Simplu": { eu: "mersei", tu: "merseși", "el/ea": "merse", "noi": "merserăm", "voi": "merserăți", "ei/ele": "merseră" },
+    "Mai Mult Ca Perf.": { eu: "mersesem", tu: "merseseși", "el/ea": "mersese", "noi": "merseserăm", "voi": "merseserăți", "ei/ele": "merseseră" },
+    "Viitor":         { eu: "voi merge", tu: "vei merge", "el/ea": "va merge", "noi": "vom merge", "voi": "veți merge", "ei/ele": "vor merge" },
+    "Viitor Anterior":{ eu: "voi fi mers", tu: "vei fi mers", "el/ea": "va fi mers", "noi": "vom fi mers", "voi": "veți fi mers", "ei/ele": "vor fi mers" },
+    "Conditional":    { eu: "aș merge", tu: "ai merge", "el/ea": "ar merge", "noi": "am merge", "voi": "ați merge", "ei/ele": "ar merge" },
+    "Cond. Perfect":  { eu: "aș fi mers", tu: "ai fi mers", "el/ea": "ar fi mers", "noi": "am fi mers", "voi": "ați fi mers", "ei/ele": "ar fi mers" },
+    "Conjunctiv":     { eu: "să merg", tu: "să mergi", "el/ea": "să meargă", "noi": "să mergem", "voi": "să mergeți", "ei/ele": "să meargă" },
+    "Imperativ":      { eu: "—", tu: "mergi!", "el/ea": "—", "noi": "să mergem!", "voi": "mergeți!", "ei/ele": "—" },
+  },
+  "a veni": {
+    en: "to come", group: "IV-plain",
+    "Present":        { eu: "vin", tu: "vii", "el/ea": "vine", "noi": "venim", "voi": "veniți", "ei/ele": "vin" },
+    "Imperfect":      { eu: "veneam", tu: "veneai", "el/ea": "venea", "noi": "veneam", "voi": "veneați", "ei/ele": "veneau" },
+    "Perfect Compus": { eu: "am venit", tu: "ai venit", "el/ea": "a venit", "noi": "am venit", "voi": "ați venit", "ei/ele": "au venit" },
+    "Perfect Simplu": { eu: "venii", tu: "veniși", "el/ea": "veni", "noi": "venirăm", "voi": "venirăți", "ei/ele": "veniră" },
+    "Mai Mult Ca Perf.": { eu: "venisem", tu: "veniseși", "el/ea": "venise", "noi": "veniserăm", "voi": "veniserăți", "ei/ele": "veniseră" },
+    "Viitor":         { eu: "voi veni", tu: "vei veni", "el/ea": "va veni", "noi": "vom veni", "voi": "veți veni", "ei/ele": "vor veni" },
+    "Viitor Anterior":{ eu: "voi fi venit", tu: "vei fi venit", "el/ea": "va fi venit", "noi": "vom fi venit", "voi": "veți fi venit", "ei/ele": "vor fi venit" },
+    "Conditional":    { eu: "aș veni", tu: "ai veni", "el/ea": "ar veni", "noi": "am veni", "voi": "ați veni", "ei/ele": "ar veni" },
+    "Cond. Perfect":  { eu: "aș fi venit", tu: "ai fi venit", "el/ea": "ar fi venit", "noi": "am fi venit", "voi": "ați fi venit", "ei/ele": "ar fi venit" },
+    "Conjunctiv":     { eu: "să vin", tu: "să vii", "el/ea": "să vină", "noi": "să venim", "voi": "să veniți", "ei/ele": "să vină" },
+    "Imperativ":      { eu: "—", tu: "vino!", "el/ea": "—", "noi": "să venim!", "voi": "veniți!", "ei/ele": "—" },
+  },
+  "a iubi": {
+    en: "to love", group: "IV-esc",
+    "Present":        { eu: "iubesc", tu: "iubești", "el/ea": "iubește", "noi": "iubim", "voi": "iubiți", "ei/ele": "iubesc" },
+    "Imperfect":      { eu: "iubeam", tu: "iubeai", "el/ea": "iubea", "noi": "iubeam", "voi": "iubeați", "ei/ele": "iubeau" },
+    "Perfect Compus": { eu: "am iubit", tu: "ai iubit", "el/ea": "a iubit", "noi": "am iubit", "voi": "ați iubit", "ei/ele": "au iubit" },
+    "Perfect Simplu": { eu: "iubii", tu: "iubiși", "el/ea": "iubi", "noi": "iubirăm", "voi": "iubirăți", "ei/ele": "iubiră" },
+    "Mai Mult Ca Perf.": { eu: "iubisem", tu: "iubiseși", "el/ea": "iubise", "noi": "iubiserăm", "voi": "iubiserăți", "ei/ele": "iubiseră" },
+    "Viitor":         { eu: "voi iubi", tu: "vei iubi", "el/ea": "va iubi", "noi": "vom iubi", "voi": "veți iubi", "ei/ele": "vor iubi" },
+    "Viitor Anterior":{ eu: "voi fi iubit", tu: "vei fi iubit", "el/ea": "va fi iubit", "noi": "vom fi iubit", "voi": "veți fi iubit", "ei/ele": "vor fi iubit" },
+    "Conditional":    { eu: "aș iubi", tu: "ai iubi", "el/ea": "ar iubi", "noi": "am iubi", "voi": "ați iubi", "ei/ele": "ar iubi" },
+    "Cond. Perfect":  { eu: "aș fi iubit", tu: "ai fi iubit", "el/ea": "ar fi iubit", "noi": "am fi iubit", "voi": "ați fi iubit", "ei/ele": "ar fi iubit" },
+    "Conjunctiv":     { eu: "să iubesc", tu: "să iubești", "el/ea": "să iubească", "noi": "să iubim", "voi": "să iubiți", "ei/ele": "să iubească" },
+    "Imperativ":      { eu: "—", tu: "iubește!", "el/ea": "—", "noi": "să iubim!", "voi": "iubiți!", "ei/ele": "—" },
+  },
+  "a vorbi": {
+    en: "to speak", group: "IV-esc",
+    "Present":        { eu: "vorbesc", tu: "vorbești", "el/ea": "vorbește", "noi": "vorbim", "voi": "vorbiți", "ei/ele": "vorbesc" },
+    "Imperfect":      { eu: "vorbeam", tu: "vorbeai", "el/ea": "vorbea", "noi": "vorbeam", "voi": "vorbeați", "ei/ele": "vorbeau" },
+    "Perfect Compus": { eu: "am vorbit", tu: "ai vorbit", "el/ea": "a vorbit", "noi": "am vorbit", "voi": "ați vorbit", "ei/ele": "au vorbit" },
+    "Perfect Simplu": { eu: "vorbii", tu: "vorbiși", "el/ea": "vorbi", "noi": "vorbirăm", "voi": "vorbirăți", "ei/ele": "vorbiră" },
+    "Mai Mult Ca Perf.": { eu: "vorbisem", tu: "vorbiseși", "el/ea": "vorbise", "noi": "vorbiserăm", "voi": "vorbiserăți", "ei/ele": "vorbiseră" },
+    "Viitor":         { eu: "voi vorbi", tu: "vei vorbi", "el/ea": "va vorbi", "noi": "vom vorbi", "voi": "veți vorbi", "ei/ele": "vor vorbi" },
+    "Viitor Anterior":{ eu: "voi fi vorbit", tu: "vei fi vorbit", "el/ea": "va fi vorbit", "noi": "vom fi vorbit", "voi": "veți fi vorbit", "ei/ele": "vor fi vorbit" },
+    "Conditional":    { eu: "aș vorbi", tu: "ai vorbi", "el/ea": "ar vorbi", "noi": "am vorbi", "voi": "ați vorbi", "ei/ele": "ar vorbi" },
+    "Cond. Perfect":  { eu: "aș fi vorbit", tu: "ai fi vorbit", "el/ea": "ar fi vorbit", "noi": "am fi vorbit", "voi": "ați fi vorbit", "ei/ele": "ar fi vorbit" },
+    "Conjunctiv":     { eu: "să vorbesc", tu: "să vorbești", "el/ea": "să vorbească", "noi": "să vorbim", "voi": "să vorbiți", "ei/ele": "să vorbească" },
+    "Imperativ":      { eu: "—", tu: "vorbește!", "el/ea": "—", "noi": "să vorbim!", "voi": "vorbiți!", "ei/ele": "—" },
+  },
+  "a coborî": {
+    en: "to go down / descend", group: "IV-asc",
+    "Present":        { eu: "cobor", tu: "cobori", "el/ea": "coboară", "noi": "coborâm", "voi": "coborâți", "ei/ele": "coboară" },
+    "Imperfect":      { eu: "coboram", tu: "coborai", "el/ea": "cobora", "noi": "coboram", "voi": "coborați", "ei/ele": "coborau" },
+    "Perfect Compus": { eu: "am coborât", tu: "ai coborât", "el/ea": "a coborât", "noi": "am coborât", "voi": "ați coborât", "ei/ele": "au coborât" },
+    "Perfect Simplu": { eu: "coborâi", tu: "coborâși", "el/ea": "coborî", "noi": "coborârăm", "voi": "coborârăți", "ei/ele": "coborâră" },
+    "Mai Mult Ca Perf.": { eu: "coborâsem", tu: "coborâseși", "el/ea": "coborâse", "noi": "coborâserăm", "voi": "coborâserăți", "ei/ele": "coborâseră" },
+    "Viitor":         { eu: "voi coborî", tu: "vei coborî", "el/ea": "va coborî", "noi": "vom coborî", "voi": "veți coborî", "ei/ele": "vor coborî" },
+    "Viitor Anterior":{ eu: "voi fi coborât", tu: "vei fi coborât", "el/ea": "va fi coborât", "noi": "vom fi coborât", "voi": "veți fi coborât", "ei/ele": "vor fi coborât" },
+    "Conditional":    { eu: "aș coborî", tu: "ai coborî", "el/ea": "ar coborî", "noi": "am coborî", "voi": "ați coborî", "ei/ele": "ar coborî" },
+    "Cond. Perfect":  { eu: "aș fi coborât", tu: "ai fi coborât", "el/ea": "ar fi coborât", "noi": "am fi coborât", "voi": "ați fi coborât", "ei/ele": "ar fi coborât" },
+    "Conjunctiv":     { eu: "să cobor", tu: "să cobori", "el/ea": "să coboare", "noi": "să coborâm", "voi": "să coborâți", "ei/ele": "să coboare" },
+    "Imperativ":      { eu: "—", tu: "coboară!", "el/ea": "—", "noi": "să coborâm!", "voi": "coborâți!", "ei/ele": "—" },
+  },
+};
+
+const TENSE_COLORS = {
+  "Present": "#00d4ff", "Imperfect": "#ff6b35", "Perfect Compus": "#00ff88",
+  "Perfect Simplu": "#a855f7", "Mai Mult Ca Perfect": "#ff4d8d",
+  "Viitor": "#ffd700", "Viitor Anterior": "#c0a000",
+  "Conditional": "#f97316", "Cond. Perfect": "#b45309",
+  "Conjunctiv": "#818cf8", "Imperativ": "#e879f9",
+};
+
+const TENSE_TIPS = {
+  "Present": "Prezent — current actions and general truths. No continuous form; 'eu merg' = both 'I go' and 'I am going'.",
+  "Imperfect": "Imperfect — ongoing or repeated past actions. Like 'I was going' or 'I used to go'. Great for storytelling.",
+  "Perfect Compus": "Perfect Compus — the most common past tense in speech. 'am mers' = 'I went / I have gone'. Always use this in conversation.",
+  "Perfect Simplu": "Perfect Simplu — literary/formal past, common only in southern Romania (Oltenia). Prefer Perfect Compus in everyday speech.",
+  "Mai Mult Ca Perfect": "Mai Mult Ca Perfect — pluperfect, 'I had done'. Used for an action completed before another past action.",
+  "Viitor": "Viitor — formal future with 'voi/vei/va...'. Informally Romanians say 'o să merg' (o să + subjunctive) or 'am să merg'.",
+  "Viitor Anterior": "Viitor Anterior — 'will have done'. Rare but appears in formal writing and conditional chains.",
+  "Conditional": "Condițional — 'would do'. Formed with 'aș/ai/ar/am/ați/ar' + infinitive. Very useful for polite requests.",
+  "Cond. Perfect": "Condițional Perfect — 'would have done'. Used in hypothetical past: 'aș fi mers' = 'I would have gone'.",
+  "Conjunctiv": "Conjunctiv (Subjunctive) — always with 'să'. Essential after 'vreau să' (I want to), 'trebuie să' (must), 'pot să' (I can).",
+  "Imperativ": "Imperativ — commands. The 'tu' form is most used. Negative commands use 'nu' + infinitive: 'nu merge!'.",
+};
+
+function ConjugationsTab() {
+  const [selectedVerb, setSelectedVerb] = useState(Object.keys(CONJUGATIONS)[0]);
+  const [selectedTense, setSelectedTense] = useState("Present");
+  const [showRegular, setShowRegular] = useState(false);
+  const [verbSearch, setVerbSearch] = useState("");
+
+  const verb = CONJUGATIONS[selectedVerb];
+  const tenses = Object.keys(verb).filter(k => k !== "en" && k !== "group");
+  const table = verb[selectedTense];
+  const pronouns = ["eu", "tu", "el/ea", "noi", "voi", "ei/ele"];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#0f0f1a", overflow: "hidden" }}>
+      <div style={{ overflowY: "auto", flex: 1, padding: 16 }}>
+        <h2 style={{ color: "#00d4ff", fontWeight: 800, marginBottom: 4 }}>Conjugations</h2>
+        <p style={{ color: "#888", fontSize: 13, marginBottom: 14 }}>Select a verb and tense to see the full table.</p>
+
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+          {Object.keys(CONJUGATIONS).map(v => (
+            <button key={v} onClick={() => { setSelectedVerb(v); setSelectedTense("Present"); }} style={{ background: selectedVerb === v ? "linear-gradient(135deg,#00d4ff,#0099cc)" : "#1e1e30", border: "1px solid #333", color: selectedVerb === v ? "#000" : "#fff", padding: "6px 12px", borderRadius: 20, cursor: "pointer", fontSize: 12, fontWeight: selectedVerb === v ? 800 : 400 }}>
+              {v}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 18 }}>
+          {tenses.map(t => (
+            <button key={t} onClick={() => setSelectedTense(t)} style={{ background: selectedTense === t ? TENSE_COLORS[t] : "#1e1e30", border: `1px solid ${(TENSE_COLORS[t]||"#555")}55`, color: selectedTense === t ? "#000" : (TENSE_COLORS[t]||"#aaa"), padding: "5px 11px", borderRadius: 20, cursor: "pointer", fontSize: 11, fontWeight: 700 }}>
+              {t}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ background: "#1e1e30", border: `1px solid ${(TENSE_COLORS[selectedTense]||"#555")}44`, borderRadius: 16, overflow: "hidden", marginBottom: 14 }}>
+          <div style={{ background: TENSE_COLORS[selectedTense]||"#555", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontWeight: 900, color: "#000", fontSize: 15 }}>{selectedVerb}</span>
+            <span style={{ fontWeight: 700, color: "#000", fontSize: 12 }}>{selectedTense} · {verb.en}</span>
+          </div>
+          {pronouns.map((p, i) => (
+            <div key={p} style={{ display: "flex", padding: "11px 16px", borderBottom: i < pronouns.length - 1 ? "1px solid #2a2a3a" : "none", alignItems: "center" }}>
+              <span style={{ color: "#888", width: 65, fontSize: 13 }}>{p}</span>
+              <span style={{ color: "#fff", fontWeight: 700, fontSize: 15, flex: 1 }}>{table?.[p] ?? "—"}</span>
+              <button onClick={() => speak(table?.[p] ?? "")} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 15, color: "#555" }}>🔊</button>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ background: "#1a1a0a", border: "1px solid #ffd70033", borderRadius: 14, padding: 14, marginBottom: 20 }}>
+          <div style={{ color: "#ffd700", fontWeight: 700, marginBottom: 6, fontSize: 13 }}>💡 {selectedTense} — Tip</div>
+          <div style={{ color: "#aaa", fontSize: 12, lineHeight: 1.7 }}>{TENSE_TIPS[selectedTense] || "Select a tense to see a tip."}</div>
+        </div>
+
+        {verb.group && VERB_GROUPS[verb.group] && (() => {
+          const grp = VERB_GROUPS[verb.group];
+          const filtered = grp.verbs.filter(v =>
+            v.inf.toLowerCase().includes(verbSearch.toLowerCase()) ||
+            v.en.toLowerCase().includes(verbSearch.toLowerCase())
+          );
+          return (
+            <div style={{ background: "#1e1e30", border: `1px solid ${grp.color}44`, borderRadius: 16, overflow: "hidden" }}>
+              <button onClick={() => setShowRegular(!showRegular)} style={{ width: "100%", background: "none", border: "none", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}>
+                <div>
+                  <div style={{ color: grp.color, fontWeight: 800, fontSize: 14, textAlign: "left" }}>📋 {grp.label}</div>
+                  <div style={{ color: "#888", fontSize: 12, textAlign: "left", marginTop: 2 }}>{grp.verbs.length} verbs follow this pattern</div>
+                </div>
+                <span style={{ color: grp.color, fontSize: 18 }}>{showRegular ? "▲" : "▼"}</span>
+              </button>
+              {showRegular && (
+                <div style={{ padding: "0 16px 16px" }}>
+                  <div style={{ background: "#0f0f1a", border: `1px solid ${grp.color}33`, borderRadius: 10, padding: 12, marginBottom: 12, fontSize: 12, color: "#aaa", lineHeight: 1.7 }}>
+                    <span style={{ color: grp.color, fontWeight: 700 }}>Pattern: </span>
+                    <span style={{ color: "#fff" }}>{grp.pattern}</span>
+                  </div>
+                  <input value={verbSearch} onChange={e => setVerbSearch(e.target.value)} placeholder="Search verbs..." style={{ width: "100%", background: "#0f0f1a", border: "1px solid #333", borderRadius: 8, padding: "8px 12px", color: "#fff", fontSize: 13, outline: "none", marginBottom: 10 }} />
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, maxHeight: 300, overflowY: "auto" }}>
+                    {filtered.map((v, i) => (
+                      <div key={i} onClick={() => speak(v.inf)} style={{ background: "#0f0f1a", border: "1px solid #2a2a3a", borderRadius: 8, padding: "8px 10px", cursor: "pointer" }}>
+                        <div style={{ color: "#fff", fontWeight: 700, fontSize: 13 }}>{v.inf}</div>
+                        <div style={{ color: "#888", fontSize: 11, marginTop: 1 }}>{v.en}</div>
+                      </div>
+                    ))}
+                    {filtered.length === 0 && <div style={{ color: "#555", fontSize: 13, gridColumn: "span 2", textAlign: "center", padding: 16 }}>No verbs found.</div>}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+const TABS = [
+  { id: "chat",         label: "💬 Chat" },
+  { id: "vocab",        label: "📚 Vocab" },
+  { id: "alphabet",     label: "🔤 Alphabet" },
+  { id: "translate",    label: "🔄 Translate" },
+  { id: "conjugations", label: "📝 Verbs" },
+];
+
+function App() {
+  const [tab, setTab] = useState("chat");
+  const [appData, setAppData] = useState(loadData);
+
+  useEffect(() => {
+    const today = new Date().toDateString();
+    const streak = appData.streak || { lastDate: null, count: 0 };
+    if (streak.lastDate !== today) {
+      const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+      const newCount = streak.lastDate === yesterday.toDateString() ? streak.count + 1 : 1;
+      const updated = { ...appData, streak: { lastDate: today, count: newCount } };
+      setAppData(updated);
+      saveData(updated);
+    }
+  }, []);
+
+  return (
+    <div style={{ fontFamily: "'Segoe UI', system-ui, sans-serif", background: "#0f0f1a", height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <Header appData={appData} />
+      <div style={{ display: "flex", background: "#1a1a2e", borderBottom: "1px solid #333", overflowX: "auto" }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{ flex: "none", padding: "10px 14px", background: "none", border: "none", borderBottom: tab === t.id ? "2px solid #00d4ff" : "2px solid transparent", color: tab === t.id ? "#00d4ff" : "#888", fontWeight: tab === t.id ? 800 : 400, cursor: "pointer", fontSize: 12, whiteSpace: "nowrap", transition: "all 0.2s" }}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div style={{ flex: 1, overflow: "hidden" }}>
+        {tab === "chat"         && <ChatTab appData={appData} setAppData={setAppData} />}
+        {tab === "vocab"        && <VocabTab appData={appData} setAppData={setAppData} />}
+        {tab === "alphabet"     && <AlphabetTab />}
+        {tab === "translate"    && <TranslateTab />}
+        {tab === "conjugations" && <ConjugationsTab />}
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
